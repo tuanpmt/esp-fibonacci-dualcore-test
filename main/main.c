@@ -6,38 +6,92 @@
 #include "nvs_flash.h"
 #include "driver/gpio.h"
 
+SemaphoreHandle_t xSemaphore;
+
 esp_err_t event_handler(void *ctx, system_event_t *event)
 {
     return ESP_OK;
 }
 
+typedef struct {
+    int input;
+    int output;
+} thread_args;
+
+int fib(int n)
+{
+    if (n < 2) return n;
+    else {
+        int x = fib(n - 1);
+        int y = fib(n - 2);
+        return x + y;
+    }
+}
+
+void core1_task(void *ptr)
+{
+    int i = ((thread_args *) ptr)->input;
+    ((thread_args *) ptr)->output = fib(i);
+    xSemaphoreGive( xSemaphore );
+    vTaskDelete(NULL);
+}
+
+int test_single_core(int num)
+{
+    int start, end, f;
+    start = xTaskGetTickCount();
+    f = fib(num);
+    end = xTaskGetTickCount();
+    return end - start;
+}
+
+int test_dual_core(int num)
+{
+    thread_args args;
+    int start, end, f;
+
+    start = xTaskGetTickCount();
+
+    args.input = num - 1;
+    xTaskCreatePinnedToCore(core1_task, "core1", 10*1024, &args, 10, NULL, 1);
+    f = fib(num - 2);
+    xSemaphoreTake(xSemaphore, portMAX_DELAY);
+
+    f += args.output;
+    end = xTaskGetTickCount();
+    return end - start;
+}
+
+void core0_task(void *p)
+{
+    int i, max_fib_test = 100, single_time, dual_time;
+    float ratio;
+    printf("+------------------------------------+\r\n");
+    printf("|    ESP32 Fibonacci performance     |\r\n");
+    printf("+------------------------------------+\r\n");
+    printf("N \t Single Core \t Dual core \t Ratio\r\n");
+
+    xSemaphore = xSemaphoreCreateBinary();
+
+    for (i = 20; i < max_fib_test; i++) {
+        single_time = test_single_core(i);
+        dual_time = test_dual_core(i);
+        ratio =  (float)single_time / (float)dual_time;
+        printf("%d\t\t%d\t\t%d\t%03.2f\r\r\n", i, single_time, dual_time, ratio);
+    }
+}
 int app_main(void)
 {
     nvs_flash_init();
     system_init();
     tcpip_adapter_init();
     ESP_ERROR_CHECK( esp_event_loop_init(event_handler, NULL) );
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK( esp_wifi_init(&cfg) );
-    ESP_ERROR_CHECK( esp_wifi_set_storage(WIFI_STORAGE_RAM) );
-    ESP_ERROR_CHECK( esp_wifi_set_mode(WIFI_MODE_STA) );
-    wifi_config_t sta_config = {
-        .sta = {
-            .ssid = "access_point_name",
-            .password = "password",
-            .bssid_set = false
-        }
-    };
-    ESP_ERROR_CHECK( esp_wifi_set_config(WIFI_IF_STA, &sta_config) );
-    ESP_ERROR_CHECK( esp_wifi_start() );
-    ESP_ERROR_CHECK( esp_wifi_connect() );
 
-    gpio_set_direction(GPIO_NUM_4, GPIO_MODE_OUTPUT);
-    int level = 0;
+    core0_task(NULL);
+
     while (true) {
-        gpio_set_level(GPIO_NUM_4, level);
-        level = !level;
-        vTaskDelay(300 / portTICK_PERIOD_MS);
+        printf("tick\r\n");
+        vTaskDelay(1000 / portTICK_PERIOD_MS);
     }
 
     return 0;
